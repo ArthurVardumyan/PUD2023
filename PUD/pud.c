@@ -108,7 +108,7 @@ void MilkSensor_Process (uint8_t *adc_buf, uint32_t *cnt)
         data += (adc_data[i+1] << 8 | adc_data[i+2]) & 0x00000FFF;
     }
     data /= (ADC_BUF_SIZE / 3);
-    // надо считать разницу
+    // надо считать разницу между электродами.
     // ≈сли уровень превысил порог, значит электрод покрылс€ молоком
     if (data >= MILK_SENSOR_TRS) {
         *cnt++;
