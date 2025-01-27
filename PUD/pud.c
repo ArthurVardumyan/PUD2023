@@ -102,6 +102,7 @@ uint8_t TON4980_Stop (void)
 void MilkSensor_Process (uint8_t *adc_buf, uint32_t *cnt)
 {
   uint32_t data, i;
+  static uint32_t elec1, elec2;
   
     data = 0;
     for (i = 0; i < ADC_BUF_SIZE; i += 3) {
