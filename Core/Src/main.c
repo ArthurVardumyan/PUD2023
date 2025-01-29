@@ -59,11 +59,8 @@
 
 /* USER CODE BEGIN PV */
 DMA_BUFFER uint16_t TON4980[TON4980_POINT_NUM];
-//static const uint8_t adc_tx_data[3] = {0b00000110, 0b11000000, 0};
-static const uint8_t adc_tx_data[3] = {0b00000111, 0b00000000, 0};
 DMA_BUFFER uint8_t adc_data[ADC_BUF_SIZE];
-uint32_t milk_counter;
-uint32_t ton[TON4980_POINT_NUM];
+PUD_t PUD;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -140,19 +137,20 @@ int main(void)
   
   HAL_FDCAN_Start(&hfdcan1);
   CAN_SelfTest();
-  
   AO2_EN();
-  TON4980_Start(TON4980, &milk_counter);
-  
   CS_SW3_EN();
   
-  // Включаем второй зонд. Первый выключаем.
+  // Включаем нерхний зонд. Нижний выключаем.
 //  CS_SW1_DIS();
 //  CS_SW2_EN();
   
-  // Включаем первый зонд. Второй выключаем.
+  // Включаем нижний зонд. Верхний выключаем.
   CS_SW1_EN();
   CS_SW2_DIS();
+  
+  PUD.milk_counter = 0;
+  PUD.start_milking_btn = 0;
+  TON4980_Start(TON4980);
 
   /* USER CODE END 2 */
 
@@ -162,6 +160,9 @@ int main(void)
   {
       HAL_GPIO_TogglePin(LED_ISPRAVNOST_GPIO_Port, LED_ISPRAVNOST_Pin);
       HAL_Delay(300);
+      
+      PUD.start_milking_btn = Start_Milking_Button();
+      
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -340,6 +341,7 @@ void HAL_SPI_TxRxCpltCallback (SPI_HandleTypeDef *hspi)
 */
 void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim)
 {
+    static const uint8_t adc_tx_data[3] = {0b00000111, 0b00000000, 0};
     static uint32_t i = 0;
     static uint32_t j = 0;
     HAL_StatusTypeDef st;
@@ -356,10 +358,10 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef *htim)
         }
         
         if (j >= EPERIOD) {
-//            TOGGLE_SW1();
-//            TOGGLE_SW2();
+            TOGGLE_SW1();
+            TOGGLE_SW2();
             /* Обработка оцифрованного сигнала проточного дататчика молока */
-            MilkSensor_Process(adc_data, &milk_counter);
+            MilkSensor_Process(adc_data, &PUD.milk_counter);
             j = 0;
         } else {
             j++;

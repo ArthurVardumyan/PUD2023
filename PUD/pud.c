@@ -38,12 +38,10 @@ uint8_t rx_data[32];
  *
  *********************************************************************************************
 */
-uint8_t TON4980_Start (uint16_t *ton, uint32_t *cnt)
+uint8_t TON4980_Start (uint16_t *ton)
 {
     HAL_StatusTypeDef st;
  
-    // Сбрасываем счетчик надоенного молока
-    *cnt = 0;
     /* Включаем генерацию сигнала 4980 Гц. Используется аппаратный NSS */
     st = HAL_SPI_Transmit_DMA(&DAC_SPI, (uint8_t *)ton, TON4980_POINT_NUM);
     /* Запускаем таймер синхронизации генератора и АЦП */
@@ -77,7 +75,8 @@ uint8_t TON4980_Stop (void)
     
     /* Останавливаем таймер синхронизации генератора и АЦП */
     st = HAL_TIM_Base_Stop(&htim12);
-    st = HAL_TIM_Base_Stop(&htim16);
+    st |= HAL_TIM_Base_Stop(&htim16);
+    st |= HAL_TIM_Base_Stop(&htim7);
 
     if (st != HAL_OK) {
         return PUD_ERR;
@@ -99,20 +98,104 @@ uint8_t TON4980_Stop (void)
  * 
  *********************************************************************************************
 */
-void MilkSensor_Process (uint8_t *adc_buf, uint32_t *cnt)
+void MilkSensor_Process (uint8_t *adc_buf, float *milk_counter)
 {
+  enum state {
+      MILKING_OFF = 0,
+      INTAKE_START,
+      INTAKE,
+      OUTTAKE_START,
+      OUTTAKE
+  };
   uint32_t data, i;
-  static uint32_t elec1, elec2;
+  static uint32_t timer;
+  static uint8_t state = MILKING_OFF;
+  static float milk_portion = 0;
+  static int32_t elec1 = 0, elec2 = 0;
   
+  
+    // Получаем уровень сигнала электрода, который измерялся на текущем периоде
     data = 0;
     for (i = 0; i < ADC_BUF_SIZE; i += 3) {
-        data += (adc_data[i+1] << 8 | adc_data[i+2]) & 0x00000FFF;
+         data += (adc_buf[i+1] << 8 | adc_buf[i+2]) & 0x00000FFF;
     }
-    data /= (ADC_BUF_SIZE / 3);
-    // надо считать разницу между электродами.
-    // Если уровень превысил порог, значит электрод покрылся молоком
-    if (data >= MILK_SENSOR_TRS) {
-        *cnt++;
+    if (ELEC1_STATE() == 0) {
+        elec1 /= (int32_t)(ADC_BUF_SIZE / 3);
+    } else {
+        elec2 /= (int32_t)(ADC_BUF_SIZE / 3);
+    }
+  
+    // Этот код выполняется сразу после запуска доения. Начальная инициализация обработчика
+    if ((PUD.start_milking_btn == 1) && (state == MILKING_OFF)) {
+        MILK_OUTTAKE_OFF();
+        MILK_INTAKE_ON();
+        state = INTAKE_START;
+        *milk_counter = 0;
+        milk_portion = FIRST_MILK_PORTION;
+        timer = HAL_GetTick();
+        elec1 = 0;
+        elec2 = 0;
+        return;
+    }
+    
+    // Ждем когда нижний электрод покроется молоком
+    if (state == INTAKE_START) {
+        if (elec1 < elec2) {
+            state = INTAKE;
+            // Засекаем таймер времени наполнения емкости
+            timer = HAL_GetTick();
+            return;
+        }
+    }
+    
+    // Этап наполнения емкости от нижнего электрода до верхнего.
+    // Ждем когда верхний электрод покроется молоком. Проводимость нижнего электрода выше, чем верхнего
+    // т.к. он покрыт молоком. Когда проводимости сравняются (упадут ниже заданного порога MILK_SENSOR_TRS,
+    // это означает, что верхний электрод покрылся полоком. Закрываем впуск, открываем выпуск.
+    if (state == INTAKE) {
+        // надо считать разницу между электродами.
+        // Если уровень превысил порог, значит электрод покрылся молоком
+        if ((elec2 - elec1) <= MILK_SENSOR_TRS) {
+            // Закрываем впуск, открываем выпуск
+            MILK_INTAKE_OFF();
+            MILK_OUTTAKE_ON();
+            state = OUTTAKE_START;
+            return;
+        }
+    }
+    
+    // Ждем когда уровень молока опустится ниже верхнего электрода
+    if (state == OUTTAKE_START) {
+        if (elec2 > elec1) {
+            state = OUTTAKE;
+        }
+        return;
+    }
+    
+    // Это этап слива молока из измерительной емкости. Ждем когда уровень молока опустится
+    // до нижнего электрода
+    if (state == OUTTAKE) {
+        if ((elec2 - elec1) <= MILK_SENSOR_TRS) {
+        // Закрываем выпуск, открываем впуск
+            MILK_OUTTAKE_OFF();
+            MILK_INTAKE_ON();
+            state = INTAKE_START;
+            
+            // Если это первый слив, увеличиваем кол-во молока на величину FIRST_MILK_PORTION
+            // Далее на MILK_PORTION. И последний на LAST_MILK_PORTION
+            *milk_counter += milk_portion;
+            if (milk_portion == FIRST_MILK_PORTION) {
+                milk_portion = MILK_PORTION;
+            }
+        }
+        return;
+    }
+    
+    // Если время наполнения превысило таймаут, начинаем последний слив молока и завершаем доение
+    if (((state == INTAKE_START) || (state == INTAKE)) && ((HAL_GetTick() - timer) >= MILKING_TIMEOUT)) {
+        MILK_OUTTAKE_ON();
+        *milk_counter += LAST_MILK_PORTION;
+        state = MILKING_OFF;
     }
 }
 
@@ -234,6 +317,7 @@ uint8_t CAN_Transmit_Data (uint8_t adr, uint8_t func, uint8_t list_id, uint16_t 
  uint16_t index;
  uint32_t can_id;
  uint8_t frame_num;
+ HAL_StatusTypeDef st;
  static FDCAN_TxHeaderTypeDef CAN_TxHeader;
  
     index = 0;
@@ -262,7 +346,10 @@ uint8_t CAN_Transmit_Data (uint8_t adr, uint8_t func, uint8_t list_id, uint16_t 
     
     for (i = 0; i < size; i++)
     {
-        HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &CAN_TxHeader, (const uint8_t *)&data[index]);
+        st = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &CAN_TxHeader, (const uint8_t *)&data[index]);
+        if (st != HAL_OK) {
+            st = HAL_OK;
+        }
         index += 8;
         if (index >= 64) {
             return PUD_ERR;
@@ -275,4 +362,27 @@ void HAL_FDCAN_RxFifo0Callback (FDCAN_HandleTypeDef *hfdcan,  uint32_t RxFifo0IT
 {
     HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &CAN_RxHeader, &rx_data[0]);
     can_flg++;
+}
+
+uint8_t Start_Milking_Button (void)
+{
+  static uint8_t state = 0, new_state = 0;
+  static uint32_t timer = 0;
+  
+    new_state = HAL_GPIO_ReadPin(DI_FAST_START_GPIO_Port, DI_FAST_START_Pin);
+    
+    if (new_state == 0) {
+        state = 0;
+    }
+    
+    if ((new_state == 1) && (state == 0)) {
+        state = 1;
+        timer = HAL_GetTick();
+    }
+    
+    if ((new_state == 1) && (state == 1) && ((HAL_GetTick() - timer) >= BUTTUN_TIMEOUT)) {
+        return 1;
+    }
+    
+    return 0;
 }
